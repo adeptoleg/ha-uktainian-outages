@@ -10,6 +10,7 @@ from homeassistant.components.panel_custom import async_register_panel
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
@@ -30,6 +31,8 @@ from .schedule import ONE_DAY, PublishedSchedules
 from .ua_outages import OPERATORS
 
 OPERATORS_BY_ID = {operator.id: operator for operator in OPERATORS}
+
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 _LOGGER = logging.getLogger(__name__)
 _PLATFORMS = (Platform.CALENDAR, Platform.SENSOR, Platform.BINARY_SENSOR)

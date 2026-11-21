@@ -3,7 +3,7 @@
   "name": "Ukrainian Outages",
   "codeowners": ["@adeptoleg"],
   "config_flow": true,
-  "dependencies": ["frontend", "network", "panel_custom"],
+  "dependencies": ["frontend", "http", "network", "panel_custom"],
   "documentation": "https://github.com/adeptoleg/ha-uktainian-outages",
   "integration_type": "service",
   "iot_class": "cloud_polling",
