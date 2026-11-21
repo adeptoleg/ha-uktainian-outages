@@ -25,7 +25,7 @@ const labels = {
     possible: "Можливе відключення",
     partial: "Відключення частину півгодини",
     night: "Ніч", twilight: "Сутінки", day: "День",
-    sunlight: "Час доби за локацією Home Assistant",
+    sunlight: "Час доби за вибраною локацією",
     intervals: "Інтервали для підчерги",
     source: "Джерело графіка",
     image: "Зображення оператора",
@@ -46,7 +46,7 @@ const labels = {
     possible: "Possible outage",
     partial: "Outage during part of the slot",
     night: "Night", twilight: "Twilight", day: "Day",
-    sunlight: "Daylight at the Home Assistant location",
+    sunlight: "Daylight at the selected location",
     intervals: "Intervals for the selected group",
     source: "Schedule source",
     image: "Operator image",
@@ -370,6 +370,49 @@ if (!customElements.get(cardType)) {
   });
 }
 
+const historyText = {
+  uk: { title: "Фактичні відключення", empty: "Зафіксованих інтервалів поки немає.",
+    actual: "За датчиком", planned: "За графіком", unmatched: "Немає зіставлення" },
+  en: { title: "Measured outages", empty: "No measured intervals yet.",
+    actual: "Measured", planned: "Scheduled", unmatched: "No matching interval" },
+};
+
+function renderHistory(container, grid, language) {
+  container.hidden = !grid;
+  if (!grid) return;
+  const text = historyText[language];
+  const records = grid.attributes.actual_outages ?? [];
+  container.querySelector("summary").textContent = `${text.title} · ${records.length}`;
+  const content = container.querySelector(".history-content");
+  const key = JSON.stringify([language, records]);
+  if (content.dataset.key === key) return;
+  content.dataset.key = key;
+  content.replaceChildren();
+  if (!records.length) {
+    content.textContent = text.empty;
+    return;
+  }
+  const format = new Intl.DateTimeFormat(language, {
+    timeZone: "Europe/Kyiv", month: "short", day: "numeric",
+    hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  });
+  const time = (value) => Number.isFinite(Date.parse(value)) ? format.format(new Date(value)) : null;
+  for (const row of records.slice().reverse()) {
+    const start = time(row.start), end = time(row.end);
+    if (!start || !end) continue;
+    const item = document.createElement("p");
+    const label = document.createElement("strong");
+    const plan = document.createElement("span");
+    label.textContent = `${text.actual} ${start} – ${end}`;
+    const plannedStart = time(row.planned_start), plannedEnd = time(row.planned_end);
+    plan.textContent = plannedStart && plannedEnd
+      ? `${text.planned} ${plannedStart} – ${plannedEnd}`
+      : text.unmatched;
+    item.append(label, plan);
+    content.append(item);
+  }
+}
+
 const panelType = "adept-ua-outages-panel";
 
 const panelText = {
@@ -437,16 +480,26 @@ class ZakarpattiaOutagesPanel extends HTMLElement {
           border-radius: var(--ha-card-border-radius, 12px); }
         dt { color: var(--secondary-text-color); font-size: 13px; margin-bottom: 4px; }
         dd { margin: 0; font-size: 16px; font-weight: 600; }
+        .site-label { margin: 0 0 16px; font-size: 16px; font-weight: 600; }
+        details { margin-top: 16px; border: 1px solid var(--divider-color, #777);
+          border-radius: 12px; padding: 12px; }
+        summary { cursor: pointer; font-weight: 600; }
+        .history-content { margin-top: 12px; max-height: 340px; overflow: auto; }
+        .history-content p { display: grid; gap: 4px; margin: 0; padding: 8px 2px;
+          border-bottom: 1px solid var(--divider-color, #777); }
+        .history-content span { color: var(--secondary-text-color); }
         [hidden] { display: none; }
       </style>
       <header><ha-menu-button></ha-menu-button><h1></h1><a href="/config/integrations/integration/adept_ua_outages"></a></header>
       <main>
+        <p class="site-label" hidden></p>
         <label hidden><span></span><select></select></label>
         <dl>
           <div><dt></dt><dd></dd></div><div><dt></dt><dd></dd></div>
           <div><dt></dt><dd></dd></div><div><dt></dt><dd></dd></div>
         </dl>
         <adept-ua-outages-card></adept-ua-outages-card>
+        <details hidden><summary></summary><div class="history-content"></div></details>
       </main>`;
     this._select = root.querySelector("select");
     this._card = root.querySelector(cardType);
@@ -484,14 +537,17 @@ class ZakarpattiaOutagesPanel extends HTMLElement {
     settings.textContent = text.settings;
     settings.hidden = !user?.is_admin;
     root.querySelector("label").hidden = configured.length <= 1;
+    const label = root.querySelector(".site-label");
+    label.textContent = state?.attributes.location_label || "";
+    label.hidden = configured.length > 1 || !label.textContent;
     root.querySelector("label span").textContent = labels[lang].queue;
 
-    const optionsKey = JSON.stringify(configured.map(([id, item]) => [id, item.attributes.queue]));
+    const optionsKey = JSON.stringify(configured.map(([id, item]) => [id, item.attributes.queue, item.attributes.location_label]));
     if (optionsKey !== this._optionsKey) {
       this._select.replaceChildren(...configured.map(([id, item]) => {
         const option = document.createElement("option");
         option.value = id;
-        option.textContent = `${item.attributes.operator_name} · ${item.attributes.queue}`;
+        option.textContent = [item.attributes.location_label, item.attributes.operator_name, item.attributes.queue].filter(Boolean).join(" · ");
         return option;
       }));
       this._optionsKey = optionsKey;
@@ -521,6 +577,7 @@ class ZakarpattiaOutagesPanel extends HTMLElement {
       item.querySelector("dd").textContent = values[i][1];
     });
 
+    renderHistory(root.querySelector("details"), grid, lang);
     this._card.setConfig({ entity });
     this._card.hass = this._hass;
   }

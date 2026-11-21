@@ -24,6 +24,7 @@ from .const import (
     PANEL_PATH,
     UPDATE_INTERVAL,
 )
+from .features import EntryFeatures, feature_store
 from .feeds import ScheduleFeeds, source_tls_context
 from .schedule import ONE_DAY, PublishedSchedules
 from .ua_outages import OPERATORS
@@ -48,6 +49,9 @@ class ScheduleCoordinator(DataUpdateCoordinator[PublishedSchedules]):
         )
         self.queue: str = entry.data[CONF_QUEUE]
         self.operator = OPERATORS_BY_ID[entry.data[CONF_OPERATOR]]
+        self.features = EntryFeatures(
+            hass, entry, self.queue, entry.title, self.operator.id
+        )
         self.feeds = hass.data[DOMAIN]["feeds"]
 
     async def _async_update_data(self) -> PublishedSchedules:
@@ -99,6 +103,8 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 async def async_setup_entry(hass: HomeAssistant, entry: ScheduleEntry) -> bool:
     """Set up the selected subqueue and optional grid measurement."""
     coordinator = ScheduleCoordinator(hass, entry)
+    await coordinator.features.async_start()
+    entry.async_on_unload(entry.add_update_listener(_async_reload_options))
     await coordinator.async_refresh()
     entry.runtime_data = coordinator
     await hass.config_entries.async_forward_entry_setups(entry, _PLATFORMS)
@@ -122,7 +128,18 @@ async def async_unload_entry(hass: HomeAssistant, entry: ScheduleEntry) -> bool:
     if not await hass.config_entries.async_unload_platforms(entry, _PLATFORMS):
         return False
     active_entries = hass.data[DOMAIN]["entries"]
+    await entry.runtime_data.features.async_flush()
     active_entries.discard(entry.entry_id)
     if not active_entries:
         frontend.async_remove_panel(hass, PANEL_PATH)
     return True
+
+
+async def _async_reload_options(hass: HomeAssistant, entry: ScheduleEntry) -> None:
+    if entry.runtime_data.features.options != entry.options:
+        await hass.config_entries.async_reload(entry.entry_id)
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ScheduleEntry) -> None:
+    """Remove saved measurements and notification keys with the entry."""
+    await feature_store(hass, entry.entry_id).async_remove()

@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from typing import ClassVar
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import ScheduleEntry
@@ -42,6 +42,21 @@ class ScheduleStatus(ScheduleEntity, SensorEntity):
         "no_outage_scheduled",
     ]
 
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self.coordinator.features.plan = self.current_intervals
+        self.coordinator.features.async_check_advance(datetime.now(UTC))
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        super()._handle_coordinator_update()
+        self.coordinator.features.async_check_advance(datetime.now(UTC))
+
+    @callback
+    def _async_tick(self, now: datetime) -> None:
+        super()._async_tick(now)
+        self.coordinator.features.async_check_advance(now)
+
     @property
     def native_value(self) -> str:
         now = datetime.now(UTC)
@@ -63,6 +78,9 @@ class ScheduleStatus(ScheduleEntity, SensorEntity):
     def extra_state_attributes(self) -> dict:
         now = datetime.now(UTC)
         today = now.astimezone(KYIV).date()
+        location = self.coordinator.features.location or {}
+        latitude = location.get("latitude", self.hass.config.latitude)
+        longitude = location.get("longitude", self.hass.config.longitude)
         data = self.coordinator.data if self.available else None
         operator = self.coordinator.operator
         published = data.days if data else {}
@@ -79,6 +97,7 @@ class ScheduleStatus(ScheduleEntity, SensorEntity):
                 for day in days
             },
             "queue": self.coordinator.queue,
+            "location_label": self.coordinator.features.label,
             "operator": operator.id,
             "adept_ua_outages": True,
             "operator_name": operator.name,
@@ -94,10 +113,7 @@ class ScheduleStatus(ScheduleEntity, SensorEntity):
             if published
             else list(operator.groups),
             "daylight": {
-                day.isoformat(): daylight(
-                    day, self.hass.config.latitude, self.hass.config.longitude
-                )
-                for day in days
+                day.isoformat(): daylight(day, latitude, longitude) for day in days
             },
             "next_outage": (
                 outage.isoformat() if (outage := self.scheduled_outage(now)) else None

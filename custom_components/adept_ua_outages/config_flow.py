@@ -1,7 +1,8 @@
 """Select a territory, operator and outage group."""
 
 import voluptuous as vol
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResult
+from homeassistant.core import callback
 from homeassistant.helpers.selector import (
     BooleanSelector,
     EntitySelector,
@@ -21,6 +22,7 @@ from .const import (
     DOMAIN,
 )
 from .feeds import supports_schedules
+from .options import OutageOptionsFlow
 from .schedule import GROUP_PATTERN
 from .ua_outages import REGIONS
 
@@ -37,6 +39,11 @@ class OutageConfigFlow(ConfigFlow, domain=DOMAIN):
     """Create one config entry for a group of a specific operator."""
 
     VERSION = 1
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: ConfigEntry) -> OutageOptionsFlow:
+        return OutageOptionsFlow()
 
     async def async_step_user(self, user_input: dict | None = None) -> ConfigFlowResult:
         if user_input is not None:
