@@ -1,0 +1,73 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Виберіть область",
+        "description": "Спочатку виберіть область або місто. Далі Home Assistant запропонує оператора й чергу.",
+        "data": {
+          "region": "Область або місто"
+        }
+      },
+      "reconfigure": {
+        "title": "Датчик фактичної наявності мережі",
+        "data": {
+          "grid_sensor": "Бінарний датчик наявності мережі (необов’язково)",
+          "invert_grid": "Інвертувати датчик (On означає, що мережі немає)"
+        }
+      },
+      "operator": {
+        "title": "Виберіть оператора",
+        "data": {
+          "operator": "Оператор системи розподілу"
+        }
+      },
+      "queue": {
+        "title": "Черга відключення",
+        "description": "{operator}. Виберіть чергу або введіть її номер. {note}",
+        "data": {
+          "queue": "Підчерга ГПВ",
+          "grid_sensor": "Бінарний датчик наявності мережі (необов’язково)",
+          "invert_grid": "Інвертувати датчик (On означає, що мережі немає)"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "Цю чергу оператора вже додано.",
+      "reconfigure_successful": "Налаштування датчика мережі оновлено."
+    },
+    "error": {
+      "invalid_queue": "Введіть номер групи, наприклад 3 або 3.2."
+    }
+  },
+  "entity": {
+    "calendar": {
+      "schedule": {
+        "name": "Графік відключень {queue} · {operator}"
+      }
+    },
+    "sensor": {
+      "status": {
+        "name": "Стан за графіком {queue} · {operator}",
+        "state": {
+          "unpublished": "Графік на сьогодні недоступний",
+          "outage_scheduled": "За графіком відключення",
+          "no_outage_scheduled": "Зараз за графіком відключення немає",
+          "unsupported": "Джерело графіка відсутнє",
+          "emergency": "Аварійні обмеження",
+          "possible_outage": "Можливе відключення"
+        }
+      },
+      "next_outage": {
+        "name": "Наступне відключення за графіком {queue} · {operator}"
+      },
+      "next_restoration": {
+        "name": "Наступне відновлення за графіком {queue} · {operator}"
+      }
+    },
+    "binary_sensor": {
+      "grid_power": {
+        "name": "Мережа {queue} · {operator}"
+      }
+    }
+  }
+}

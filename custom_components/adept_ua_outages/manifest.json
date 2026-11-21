@@ -1,0 +1,12 @@
+{
+  "domain": "adept_ua_outages",
+  "name": "Ukrainian Outages",
+  "codeowners": ["@adeptoleg"],
+  "config_flow": true,
+  "dependencies": ["frontend", "network", "panel_custom"],
+  "documentation": "https://github.com/adeptoleg/ha-uktainian-outages",
+  "integration_type": "service",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/adeptoleg/ha-uktainian-outages/issues",
+  "version": "0.1.0"
+}

@@ -1,0 +1,272 @@
+"""Whether each operator's schedules can be fetched right now: one check of every source.
+
+Used by ``scripts/source_status.py`` in CI and by the Telegram bot, which publishes what it
+sees from Ukraine to fastiuk/ukraine-energy-monitor-status. Per operator: a shields.io
+endpoint badge (https://shields.io/badges/endpoint-badge), an entry of ``summary.json`` and a
+row of a Markdown table; ``readme_table`` is the table of the core's README.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import re
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any
+from urllib.parse import quote
+
+from .http import Fetcher, redact
+from .models import now_kyiv
+from .providers.base import AddressSource, NotApplied, Provider, SourceBlocked
+from .registry import LATER, NOT_PUBLISHED, OPERATORS_BY_ID, REGIONS, REGIONS_BY_ID, Operator
+
+#: What a person would type at each step of the address search, for per-address sources: the
+#: operators' own offices.
+ADDRESSES = {"ternopil-oe": ["Тернопіль", "Руська", "1"], "vinnytsia-oe": ["Вінниця", "Магістратська", "2"]}
+#: A failed check is tried once more after this many seconds: sites time out or answer 502 now and then.
+RETRY_AFTER = 15
+#: Short names for regions with more than one operator.
+SHORT = {"dtek-dnem": "ДТЕК", "cek": "ЦЕК"}
+#: Where the bot publishes: ``<operator>.svg`` badges, ``summary.json``, a README.
+STATUS_REPOSITORY = "https://github.com/fastiuk/ukraine-energy-monitor-status"
+STATUS_FILES = "https://raw.githubusercontent.com/fastiuk/ukraine-energy-monitor-status/main"
+
+
+@dataclass(frozen=True)
+class Status:
+    message: str
+    color: str
+    #: An operator that should work does not.
+    broken: bool = False
+
+
+WORKS = Status("працює", "brightgreen")
+FALLBACK = Status("працює (резервне джерело)", "yellow")
+BROKEN = Status("не працює", "red", broken=True)
+UKRAINE_ONLY = Status("перевіряється лише з України", "blue")
+BLOCKED = Status("заблоковано захистом сайту", "yellow")
+NOT_YET = Status("згодом", "lightgrey")
+NONE = Status("не публікує", "lightgrey")
+UNAVAILABLE = Status("недоступно", "lightgrey")
+OCCUPIED = Status("тимчасово окупована — буде після повернення додому", "0057b7")
+#: Not looked at yet (just started, or a per-address source nobody subscribed to).
+NOT_CHECKED = Status("ще не перевірено", "lightgrey")
+#: Every status, by a short name (for files named after them).
+STATUSES = {
+    "works": WORKS, "fallback": FALLBACK, "broken": BROKEN, "ukraine_only": UKRAINE_ONLY, "blocked": BLOCKED,
+    "not_yet": NOT_YET, "none": NONE, "unavailable": UNAVAILABLE, "occupied": OCCUPIED, "not_checked": NOT_CHECKED,
+}  # fmt: skip
+
+
+@dataclass(frozen=True)
+class SourceResult:
+    source: str
+    #: "ok", "skipped" (not queried from abroad), "blocked" or "error".
+    result: str
+    detail: str
+
+
+@dataclass(frozen=True)
+class OperatorStatus:
+    operator: Operator
+    status: Status
+    sources: tuple[SourceResult, ...]
+
+    def badge(self) -> dict[str, Any]:
+        return {"schemaVersion": 1, "label": label(self.operator), "message": self.status.message, "color": self.status.color}
+
+    def summary(self) -> dict[str, Any]:
+        results = {r.source: r for r in self.sources}
+        return {
+            "status": self.status.message,
+            "official": self.operator.official if self.operator.available else None,
+            "sources": [
+                {
+                    "source": s.name,
+                    "kind": str(s.kind),
+                    "official": s.official,
+                    "link": s.link,
+                    "result": results[s.name].result if s.name in results else None,
+                    "detail": results[s.name].detail if s.name in results else None,
+                }
+                for s in self.operator.sources
+            ],
+        }
+
+    def row(self) -> str:
+        op = self.operator
+        details = "; ".join(f"{s.source}: {s.result} ({s.detail})" for s in self.sources) or op.note or ""
+        return (
+            f"| {label(op)} | {operator_name(op)} | {self.status.message} | {official_cell(op)} | {source_cell(op)} "
+            f"| {cell(details, 1000)} |"
+        )
+
+
+def ordered() -> list[Operator]:
+    """Operators in the order of regions (Kyiv, Crimea, oblasts, Sevastopol)."""
+    return [OPERATORS_BY_ID[o] for region in REGIONS for o in region.operators]
+
+
+def label(op: Operator) -> str:
+    region = REGIONS_BY_ID[op.region]
+    return f"{region.name} · {SHORT[op.id]}" if op.id in SHORT else region.name
+
+
+def operator_name(op: Operator) -> str:
+    return "—" if REGIONS_BY_ID[op.region].occupied else cell(op.name)
+
+
+def _mark(source: Provider) -> str:
+    return "✅" if source.official else "❌"
+
+
+def _link(text: str, url: str | None) -> str:
+    # Brackets and spaces in an address would end a Markdown link early.
+    return f"[{text}]({quote(url, safe=':/?&=%#.,~-_+')})" if url else text
+
+
+def official_cell(op: Operator) -> str:
+    """✅ the operator's own website, API or channel, ❌ someone else's mirror; fallbacks after
+    "резерв", — no schedules at all."""
+    if not op.sources:
+        return "—"
+    primary, *rest = op.sources
+    return _mark(primary) + (" · резерв " + " ".join(map(_mark, rest)) if rest else "")
+
+
+def source_cell(op: Operator) -> str:
+    """What each source reads (API, a page, a picture, a channel, a mirror), linked where fixed."""
+    if not op.sources:
+        return "—"
+    primary, *rest = op.sources
+    text = _link(str(primary.kind), primary.link)
+    return text + (" · резерв: " + ", ".join(_link(str(s.kind), s.link) for s in rest) if rest else "")
+
+
+def dynamic(op: Operator) -> bool:
+    """The operator's state changes and is published; occupied or without sources it is fixed."""
+    return op.available and not REGIONS_BY_ID[op.region].occupied
+
+
+def badge_markdown(op: Operator) -> str:
+    """The README's badge: published by the bot, or fixed (no fetch that could fail)."""
+    if dynamic(op):
+        return f"[![{op.id}]({STATUS_FILES}/{op.id}.svg)]({STATUS_REPOSITORY}#readme)"
+    status = verdict(op, ())
+    message = quote(status.message.replace("-", "--").replace("_", "__"), safe="")
+    return f"![{op.id}](https://img.shields.io/badge/-{message}-{status.color})"
+
+
+#: Characters with a meaning in Markdown, and what starts a bare URL GitHub turns into a
+#: link: the ":" of "://", the "." after "www".
+_MARKDOWN_RE = re.compile(r"([\\`*_{}\[\]()<>#+!|~&]|:(?=//)|(?<=www)\.)", re.IGNORECASE)
+
+
+def cell(text: str, limit: int = 300) -> str:
+    """Text from a source, shown as-is in a Markdown table (no links, no extra columns).
+
+    Each of those characters gets a backslash, which the renderer drops: "https\\://x" and
+    "www\\.x" show as "https://x" and "www.x", but not as links.
+    """
+    text = " ".join(text.split())[:limit]
+    return _MARKDOWN_RE.sub(r"\\\1", text)
+
+
+async def _address_key(op: Operator, session: Any) -> str:
+    lookup = op.lookup
+    assert lookup is not None
+    http = Fetcher(session, lookup.hosts, max_bytes=lookup.max_bytes)
+    path: list[str] = []
+    for query in ADDRESSES[op.id]:
+        choices = await lookup.options(http, path, query)
+        if not choices:
+            raise LookupError(f"nothing found for {query!r}")
+        path.append(choices[0].id)
+        await asyncio.sleep(lookup.request_gap)
+    resolution = await lookup.resolve(http, path)
+    if not resolution.address:
+        raise LookupError("the lookup gave no address key")
+    return resolution.address
+
+
+async def check_source(op: Operator, source: Provider, session: Any, *, abroad: bool = False) -> SourceResult:
+    """One fetch from one source, once more after ``RETRY_AFTER`` if it fails; ``abroad`` skips
+    the sites that answer only Ukrainian connections."""
+    if abroad and source.ukraine_only:
+        return SourceResult(source.name, "skipped", "only answers connections from Ukraine")
+    result = await _check_once(op, source, session)
+    if result.result == "error":
+        await asyncio.sleep(RETRY_AFTER)
+        result = await _check_once(op, source, session)
+    return result
+
+
+async def _check_once(op: Operator, source: Provider, session: Any) -> SourceResult:
+    try:
+        http = Fetcher(session, source.hosts)
+        if isinstance(source, AddressSource):
+            schedules = await source.fetch_address(http, now_kyiv(), await _address_key(op, session))
+        else:
+            schedules = await source.fetch(http, now_kyiv())
+    except SourceBlocked as err:
+        return SourceResult(source.name, "blocked", redact(str(err)))
+    except NotApplied:
+        return SourceResult(source.name, "ok", "schedules do not apply now")
+    except Exception as err:  # every failure is a finding here
+        return SourceResult(source.name, "error", redact(f"{type(err).__name__}: {err}"))
+    for schedule in schedules.values():
+        if extra := set(schedule.mentioned_groups()) - set(op.groups):
+            return SourceResult(source.name, "error", f"unknown groups {sorted(extra)}")
+        if (unparsed := schedule.unparsed_groups()) and not source.hours_on_picture:
+            return SourceResult(source.name, "error", f"unparsed groups {unparsed}")
+    days = ", ".join(f"{d:%d.%m}" for d in schedules) or "nothing published"
+    return SourceResult(source.name, "ok", days)
+
+
+def verdict(op: Operator, results: list[SourceResult] | tuple[SourceResult, ...]) -> Status:
+    if REGIONS_BY_ID[op.region].occupied:
+        return OCCUPIED
+    if not op.available:
+        return NOT_YET if op.note == LATER else NONE if op.note == NOT_PUBLISHED else UNAVAILABLE
+    kinds = [r.result for r in results]
+    if kinds[0] == "ok":
+        return WORKS
+    if "ok" in kinds:
+        return FALLBACK
+    if "error" in kinds:
+        return BROKEN
+    return UKRAINE_ONLY if "skipped" in kinds else BLOCKED
+
+
+async def check_all(session: Any, *, abroad: bool = False) -> list[OperatorStatus]:
+    """Every operator, one source after another (one request at a time per site)."""
+    statuses = []
+    for op in ordered():
+        results = tuple([await check_source(op, s, session, abroad=abroad) for s in op.sources])
+        statuses.append(OperatorStatus(op, verdict(op, results), results))
+    return statuses
+
+
+def table(statuses: list[OperatorStatus]) -> str:
+    header = "| Область | Оператор | Стан | Джерело офіційне | Джерело | Відповідь джерел |"
+    return "\n".join([header, "|---|---|---|---|---|---|", *(s.row() for s in statuses)])
+
+
+def readme_table() -> str:
+    """The core README's table: every operator, its badge, its sources and 🔎 for address search."""
+    rows = [
+        f"| {label(op)} | {operator_name(op)} | {badge_markdown(op)} | {official_cell(op)} | {source_cell(op)} "
+        f"| {'🔎' if op.lookup else ''} |"
+        for op in ordered()
+    ]
+    header = "| Область | Оператор | Стан | Джерело офіційне | Джерело | 🔎 |"
+    return "\n".join([header, "|---|---|---|---|---|---|", *rows])
+
+
+def files(statuses: list[OperatorStatus], checked_at: datetime) -> dict[str, str]:
+    """``<operator>.json`` badges and ``summary.json``, by file name."""
+    out = {f"{s.operator.id}.json": json.dumps(s.badge(), ensure_ascii=False) for s in statuses}
+    summary = {"checked_at": checked_at.isoformat(timespec="seconds"), "operators": {s.operator.id: s.summary() for s in statuses}}
+    out["summary.json"] = json.dumps(summary, ensure_ascii=False, indent=1)
+    return out

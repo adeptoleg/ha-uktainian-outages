@@ -1,0 +1,531 @@
+const cardType = "adept-ua-outages-card";
+const validGroup = /^[0-9]{1,3}(?:\.[0-9]{1,2})?$/;
+const belongsToIntegration = ({ attributes }) =>
+  validGroup.test(attributes.queue) && attributes.all_queues && attributes.region && attributes.operator_name && attributes.adept_ua_outages === true;
+const hours = Array.from({ length: 24 }, (_, hour) => String(hour).padStart(2, "0"));
+const confirmedRow = /^[0123]{48}$/;
+const displayDate = (day) => day ? day.split("-").reverse().join(".") : "";
+const isoDay = /^\d{4}-\d{2}-\d{2}$/;
+const kyivClock = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Europe/Kyiv", year: "numeric", month: "2-digit", day: "2-digit",
+  hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+});
+
+const labels = {
+  uk: {
+    title: "Графік відключень",
+    today: "Сьогодні",
+    tomorrow: "Завтра",
+    queue: "Підчерга",
+    outage: "Відключення за графіком",
+    clear: "Відключення не заплановано",
+    unknown: "Графік не опубліковано",
+    offline: "Дані графіка недоступні",
+    clock: "Зараз",
+    possible: "Можливе відключення",
+    partial: "Відключення частину півгодини",
+    night: "Ніч", twilight: "Сутінки", day: "День",
+    sunlight: "Час доби за локацією Home Assistant",
+    intervals: "Інтервали для підчерги",
+    source: "Джерело графіка",
+    image: "Зображення оператора",
+    jumpToNow: "Перейти до поточного часу",
+    untilRestoration: "До відновлення за графіком",
+    untilOutage: "До відключення за графіком",
+  },
+  en: {
+    title: "Ukrainian outage schedule",
+    today: "Today",
+    tomorrow: "Tomorrow",
+    queue: "Subqueue",
+    outage: "Scheduled outage",
+    clear: "No scheduled outage",
+    unknown: "Schedule not published",
+    offline: "Schedule data unavailable",
+    clock: "Now",
+    possible: "Possible outage",
+    partial: "Outage during part of the slot",
+    night: "Night", twilight: "Twilight", day: "Day",
+    sunlight: "Daylight at the Home Assistant location",
+    intervals: "Intervals for the selected group",
+    source: "Schedule source",
+    image: "Operator image",
+    jumpToNow: "Go to the current time",
+    untilRestoration: "Until scheduled restoration",
+    untilOutage: "Until scheduled outage",
+  },
+};
+
+const styles = `
+  ha-card { --queue-width: 82px; overflow: hidden; color: var(--primary-text-color); }
+  .heading { padding: 18px 16px 10px; }
+  h2 { margin: 0; font-size: 1.2rem; font-weight: 600; line-height: 1.35; }
+  .controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px;
+    padding: 4px 16px 12px; }
+  .days, .clock { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+  .clock { font-size: 13px; font-variant-numeric: tabular-nums; }
+  .countdown { color: var(--primary-text-color); font-weight: 600; }
+  button {
+    color: inherit; background: transparent; padding: 7px 12px; cursor: pointer;
+    border: 1px solid var(--divider-color, #777); border-radius: 999px; font: inherit;
+  }
+  button[aria-pressed="true"] {
+    border-color: var(--primary-color, #1682aa);
+    background: color-mix(in srgb, var(--primary-color, #1682aa) 16%, transparent);
+    font-weight: 600;
+  }
+  .scroll { overflow-x: auto; }
+  .timeline { position: relative; min-width: 850px; }
+  table { border-spacing: 0; table-layout: fixed; width: 100%; }
+  .time-scale { pointer-events: none; position: absolute; inset: 0 0 0 var(--queue-width); z-index: 1; }
+  .now-line { position: absolute; top: 0; bottom: 0; width: 3px; transform: translateX(-50%);
+    background: #d51b32; box-shadow: 0 0 0 1px white; }
+  [hidden] { display: none; }
+  th { font-size: 12px; font-variant-numeric: tabular-nums; }
+  th, td { border-bottom: 1px solid var(--divider-color, #8887); box-sizing: border-box; }
+  th[scope="row"], .queue {
+    width: var(--queue-width); padding: 0 8px; text-align: left; position: sticky; left: 0;
+    background: var(--ha-card-background, var(--card-background-color, Canvas)); z-index: 2;
+  }
+  th[scope="colgroup"] { border-left: 1px solid var(--divider-color, #8887); height: 26px; }
+  td { height: 24px; }
+  td:nth-child(even) { border-left: 1px solid var(--divider-color, #8887); }
+  .outage { background: #d76638; }
+  .clear { background: color-mix(in srgb, var(--success-color, #568067) 20%, transparent); }
+  .possible { background: #c4a225; }
+  .partial { background: repeating-linear-gradient(140deg, #d76638 0 4px, transparent 4px 8px); }
+  .solar-band { height: 8px; position: relative; margin-left: var(--queue-width); }
+  .solar-band span { position: absolute; top: 0; bottom: 0; }
+  .night { background: #314775; }
+  .twilight { background: #a26a8f; }
+  .day { background: #efcd74; }
+  .details { padding: 0 16px 16px; display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: baseline; }
+  .details ul { list-style: none; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; margin: 0; }
+  .details[hidden] { display: none; }
+  .details li { padding: 4px 8px; border-radius: 5px; border: 1px solid var(--divider-color, #777); }
+  .details li.possible-time { border-color: #c4a225; }
+  .details a { color: var(--primary-color); }
+  .unknown { background: repeating-linear-gradient(130deg, #8882 0 3px, transparent 3px 7px); }
+  tr.selected > * {
+    border-top: 2px solid var(--primary-color, #1682aa);
+    border-bottom: 2px solid var(--primary-color, #1682aa);
+  }
+  tr.selected th {
+    color: var(--primary-color, #1682aa);
+    border-left: 3px solid currentColor; font-weight: 800;
+  }
+  tr.selected td:last-child { border-right: 2px solid var(--primary-color, #1682aa); }
+  .legend {
+    display: flex; flex-wrap: wrap; gap: 8px 16px; padding: 12px 16px 16px;
+    margin: 0; list-style: none; font-size: 12px;
+  }
+  .legend li { display: inline-flex; align-items: center; gap: 6px; }
+  .swatch { width: 13px; height: 13px; border-radius: 3px; border: 1px solid #8885; }
+  .notice { padding: 0 16px 12px; margin: 0; color: var(--secondary-text-color); }
+`;
+
+class ZakarpattiaOutagesCard extends HTMLElement {
+  static getStubConfig() {
+    return {};
+  }
+
+  constructor() {
+    super();
+    this.attachShadow({ mode: "open" });
+    this._dayIndex = 0;
+    this.shadowRoot.addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-day], button[data-now]");
+      if (!button) return;
+      const jumpToNow = button.hasAttribute("data-now");
+      this._dayIndex = jumpToNow ? 0 : Number(button.dataset.day);
+      if (this._dayIndex === 0) this._centeredDate = undefined;
+      this._render();
+      const selector = jumpToNow ? "[data-now]" : `[data-day="${this._dayIndex}"]`;
+      this.shadowRoot.querySelector(selector).focus({ preventScroll: true });
+    });
+  }
+
+  connectedCallback() {
+    this._updateClock();
+    this._scheduleClock();
+  }
+
+  disconnectedCallback() {
+    clearTimeout(this._clockTimer);
+  }
+
+  _scheduleClock() {
+    this._clockTimer = setTimeout(() => {
+      this._updateClock();
+      this._scheduleClock();
+    }, 60_000 - Date.now() % 60_000);
+  }
+
+  setConfig(config) {
+    if (config.entity && typeof config.entity !== "string") {
+      throw new Error("entity must be a sensor entity ID");
+    }
+    this._config = config;
+    this._render();
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    this._render();
+  }
+
+  getCardSize() {
+    return 7;
+  }
+
+  _render() {
+    if (!this._hass || !this._config) return;
+    const { states, locale, language } = this._hass;
+    const lang = (locale?.language || language || "en").startsWith("uk") ? "uk" : "en";
+    const text = labels[lang];
+    const state = this._config.entity
+      ? states[this._config.entity]
+      : Object.values(states).find(belongsToIntegration);
+    const selected = validGroup.test(state?.attributes.queue) ? state.attributes.queue : "";
+    const schedules = state?.attributes.all_queues ?? {};
+    const days = Object.keys(schedules).filter((day) => isoDay.test(day)).sort();
+    const date = days[this._dayIndex];
+    const rows = schedules[date] ?? {};
+    const groups = state?.attributes.groups ?? [];
+    const queues = [...new Set([...groups, ...Object.keys(rows), selected])]
+      .filter((queue) => validGroup.test(queue))
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+    const published = queues.some((queue) => confirmedRow.test(rows[queue]));
+    const solar = (state?.attributes.daylight?.[date] ?? []).filter(({ start, end, phase }) =>
+      Number.isInteger(start) && Number.isInteger(end) && 0 <= start && start < end && end <= 1440 &&
+      ["night", "twilight", "day"].includes(phase)
+    );
+    const intervals = state?.attributes.schedule?.[date] ?? [];
+    const source = state?.attributes.source;
+    const image = state?.attributes.schedule_images?.[date];
+    const offline = !state || state.state === "unavailable";
+    const key = JSON.stringify([lang, selected, days, rows, queues, solar, intervals, source, image, offline, this._dayIndex]);
+    this._clockContext = { lang, text, state, date };
+    if (key === this._rendered) {
+      this._updateClock();
+      return;
+    }
+    this._rendered = key;
+    const scrollLeft = this.shadowRoot.querySelector(".scroll")?.scrollLeft ?? 0;
+    const localDate = displayDate(date);
+    const dayButtons = [text.today, text.tomorrow].map((label, i) => {
+      const formatted = displayDate(days[i]);
+      return `<button type="button" data-day="${i}" aria-pressed="${i === this._dayIndex}">${label}${formatted ? ` · ${formatted}` : ""}</button>`;
+    }).join("");
+    const heading = hours.map((hour) => `<th scope="colgroup" colspan="2">${hour}</th>`).join("");
+    const body = queues.map((queue) => {
+      const row = rows[queue];
+      const cells = this._cells(typeof row === "string" && confirmedRow.test(row) ? row : "", text);
+      const highlighted = queue === selected ? ' class="selected" aria-current="true"' : "";
+      return `<tr${highlighted}><th scope="row">${queue}</th>${cells}</tr>`;
+    }).join("");
+    const notice = offline ? text.offline : published ? "" : text.unknown;
+    const legend = ["outage", "possible", "partial", "clear", "unknown", ...(solar.length ? ["day", "twilight", "night"] : [])].map((kind) =>
+      `<li><span class="swatch ${kind}" aria-hidden="true"></span>${text[kind]}</li>`
+    ).join("");
+
+    this.shadowRoot.innerHTML = `
+      <style>${styles}</style>
+      <ha-card>
+        <div class="heading"><h2>${text.title}${selected ? ` · ${selected}` : ""}</h2></div>
+        <div class="controls">
+          <div class="days">${dayButtons}</div>
+          <div class="clock">
+            <button type="button" class="current-time" data-now title="${text.jumpToNow}"></button>
+            <span class="countdown" hidden></span>
+          </div>
+        </div>
+        ${notice ? `<p class="notice" role="status">${notice}</p>` : ""}
+        <div class="scroll" tabindex="0" aria-label="${text.title} ${localDate}">
+          <div class="timeline">
+            ${solar.length ? `<div class="solar-band" aria-label="${text.sunlight}">${solar.map(({ start, end, phase }) =>
+              `<span class="${phase}" style="left:${start / 14.4}%;width:${(end - start) / 14.4}%" title="${text[phase]}"></span>`
+            ).join("")}</div>` : ""}
+            <table aria-label="${text.title} ${localDate}">
+              <thead><tr><th class="queue" scope="col">${text.queue}</th>${heading}</tr></thead>
+              <tbody>${body}</tbody>
+            </table>
+            <div class="time-scale" aria-hidden="true"><div class="now-line" hidden></div></div>
+          </div>
+        </div>
+        <ul class="legend">${legend}</ul>
+        <div class="details" hidden></div>
+      </ha-card>`;
+    this.shadowRoot.querySelector(".scroll").scrollLeft = scrollLeft;
+    this._renderDetails(intervals, source, image, lang, text);
+    this._updateClock();
+  }
+
+  _renderDetails(intervals, source, image, lang, text) {
+    const details = this.shadowRoot.querySelector(".details");
+    const clock = new Intl.DateTimeFormat(lang, {
+      timeZone: "Europe/Kyiv", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+    });
+    if (intervals.length) {
+      const list = document.createElement("ul");
+      list.setAttribute("aria-label", text.intervals);
+      for (const { start, end, possible } of intervals) {
+        const a = Date.parse(start), b = Date.parse(end);
+        if (!Number.isFinite(a) || !Number.isFinite(b)) continue;
+        const item = document.createElement("li");
+        item.textContent = `${clock.format(a)} – ${clock.format(b)}`;
+        if (possible) {
+          item.className = "possible-time";
+          item.textContent += ` · ${text.possible}`;
+        }
+        list.append(item);
+      }
+      if (list.childElementCount) {
+        const label = document.createElement("strong");
+        label.textContent = text.intervals;
+        details.append(label, list);
+      }
+    }
+    for (const [value, label] of [[source, text.source], [image, text.image]]) {
+      if (typeof value !== "string" || !value.startsWith("https://")) continue;
+      const link = document.createElement("a");
+      link.href = value;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = label;
+      details.append(link);
+    }
+    details.hidden = !details.childElementCount;
+  }
+
+  _updateClock(now = Date.now()) {
+    if (!this._clockContext) return;
+    const { lang, text, state, date } = this._clockContext;
+    const parts = Object.fromEntries(kyivClock.formatToParts(now).map(({ type, value }) => [type, value]));
+    const today = `${parts.year}-${parts.month}-${parts.day}`;
+    const minute = Number(parts.hour) * 60 + Number(parts.minute);
+    const root = this.shadowRoot;
+    root.querySelector(".current-time").textContent = `${text.clock} ${parts.hour}:${parts.minute}`;
+    const line = root.querySelector(".now-line");
+    line.hidden = date !== today;
+    line.style.left = `${minute / 1440 * 100}%`;
+    if (!line.hidden && this._centeredDate !== today && this._centerCurrentTime(line)) {
+      this._centeredDate = today;
+    }
+
+    const countdown = root.querySelector(".countdown");
+    const intervals = state?.attributes.schedule?.[today];
+    if (!Array.isArray(intervals) || state.state === "unavailable") {
+      countdown.hidden = true;
+      return;
+    }
+
+    const active = intervals.some(({ start, end, possible }) => !possible && Date.parse(start) <= now && now < Date.parse(end));
+    const target = Date.parse(active ? state.attributes.next_restoration : state.attributes.next_outage);
+    if (!Number.isFinite(target) || target <= now) {
+      countdown.hidden = true;
+      return;
+    }
+
+    const left = Math.ceil((target - now) / 60_000);
+    const duration = new Intl.NumberFormat(lang, {
+      style: "unit", unit: "minute", unitDisplay: "short",
+    });
+    const hour = new Intl.NumberFormat(lang, {
+      style: "unit", unit: "hour", unitDisplay: "short",
+    });
+    const formatted = left >= 60 ? `${hour.format(Math.floor(left / 60))} ${duration.format(left % 60)}`
+      : duration.format(left);
+    countdown.textContent = `${active ? text.untilRestoration : text.untilOutage} ${formatted}`;
+    countdown.hidden = false;
+  }
+
+  _centerCurrentTime(line) {
+    const scroll = this.shadowRoot.querySelector(".scroll");
+    if (!scroll.clientWidth) return false;
+    const queueWidth = this.shadowRoot.querySelector("th.queue").offsetWidth;
+    const marker = line.getBoundingClientRect();
+    const scrollLeft = scroll.getBoundingClientRect().left;
+    const center = (scroll.clientWidth + queueWidth) / 2;
+    scroll.scrollLeft += marker.left + marker.width / 2 - scrollLeft - center;
+    return true;
+  }
+
+  _cells(row, text) {
+    return hours.map((hour, i) => [0, 1].map((half) => {
+      const state = row ? ["clear", "outage", "possible", "partial"][Number(row[i * 2 + half])] : "unknown";
+      const label = `${hour}:${half === 0 ? "00" : "30"} · ${text[state]}`;
+      return `<td class="${state}" title="${label}" aria-label="${label}"></td>`;
+    }).join("")).join("");
+  }
+}
+
+if (!customElements.get(cardType)) {
+  customElements.define(cardType, ZakarpattiaOutagesCard);
+  window.customCards ??= [];
+  window.customCards.push({
+    type: cardType,
+    name: "Ukrainian Outages",
+    description: "Regional outage schedule with your subqueue highlighted.",
+  });
+}
+
+const panelType = "adept-ua-outages-panel";
+
+const panelText = {
+  uk: {
+    title: "Графіки світла України",
+    settings: "Налаштування",
+    schedule: "Зараз за графіком",
+    grid: "Фактичний стан мережі",
+    next: "Наступне відключення",
+    restore: "Відновлення за графіком",
+    outage_scheduled: "Відключення",
+    unsupported: "Джерело для оператора відсутнє",
+    emergency: "Аварійні обмеження",
+    possible_outage: "Можливе відключення",
+    no_outage_scheduled: "Без відключення",
+    unpublished: "Графік не опубліковано",
+    on: "Мережа є",
+    off: "Мережі немає",
+    missing: "Датчик не налаштовано",
+    unavailable: "Недоступно",
+    noTime: "Час невідомий",
+  },
+  en: {
+    title: "Ukrainian outage schedules",
+    settings: "Settings",
+    schedule: "Current schedule",
+    grid: "Actual grid status",
+    next: "Next scheduled outage",
+    restore: "Scheduled restoration",
+    outage_scheduled: "Outage",
+    unsupported: "No source for this operator",
+    emergency: "Emergency restrictions",
+    possible_outage: "Possible outage",
+    no_outage_scheduled: "No outage",
+    unpublished: "Schedule not published",
+    on: "Grid available",
+    off: "Grid unavailable",
+    missing: "Sensor not configured",
+    unavailable: "Unavailable",
+    noTime: "Time unknown",
+  },
+};
+
+class ZakarpattiaOutagesPanel extends HTMLElement {
+  constructor() {
+    super();
+    const root = this.attachShadow({ mode: "open" });
+    root.innerHTML = `
+      <style>
+        :host { display: block; min-height: 100%; color: var(--primary-text-color); }
+        header { display: flex; align-items: center; gap: 12px; padding: 12px 16px;
+          min-height: 40px; background: var(--app-header-background-color);
+          color: var(--app-header-text-color); }
+        h1 { font-size: 20px; font-weight: 500; margin: 0; flex: 1; }
+        header a { color: inherit; font-weight: 600; }
+        main { box-sizing: border-box; max-width: 1300px; margin: auto; padding: clamp(12px, 3vw, 32px); }
+        label { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+        select { padding: 8px 12px; border-radius: 8px; font: inherit; color: inherit;
+          border: 1px solid var(--divider-color, #777);
+          background: var(--card-background-color, Canvas); }
+        dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 175px), 1fr));
+          gap: 10px; margin: 0 0 16px; }
+        dl div { background: var(--ha-card-background, var(--card-background-color));
+          padding: 12px; border: 1px solid var(--divider-color, #777);
+          border-radius: var(--ha-card-border-radius, 12px); }
+        dt { color: var(--secondary-text-color); font-size: 13px; margin-bottom: 4px; }
+        dd { margin: 0; font-size: 16px; font-weight: 600; }
+        [hidden] { display: none; }
+      </style>
+      <header><ha-menu-button></ha-menu-button><h1></h1><a href="/config/integrations/integration/adept_ua_outages"></a></header>
+      <main>
+        <label hidden><span></span><select></select></label>
+        <dl>
+          <div><dt></dt><dd></dd></div><div><dt></dt><dd></dd></div>
+          <div><dt></dt><dd></dd></div><div><dt></dt><dd></dd></div>
+        </dl>
+        <adept-ua-outages-card></adept-ua-outages-card>
+      </main>`;
+    this._select = root.querySelector("select");
+    this._card = root.querySelector(cardType);
+    this._select.addEventListener("change", () => {
+      this._entity = this._select.value;
+      this._render();
+    });
+  }
+
+  set narrow(narrow) {
+    this.shadowRoot.querySelector("ha-menu-button").narrow = narrow;
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    this._render();
+  }
+
+  _render() {
+    const { states, locale, language, user } = this._hass;
+    const lang = (locale?.language || language || "en").startsWith("uk") ? "uk" : "en";
+    const text = panelText[lang];
+    const configured = Object.entries(states)
+      .filter(([, entry]) => belongsToIntegration(entry))
+      .sort(([, a], [, b]) => a.attributes.operator_name.localeCompare(b.attributes.operator_name)
+        || a.attributes.queue.localeCompare(b.attributes.queue, undefined, { numeric: true }));
+    const selection = configured.find(([id]) => id === this._entity) || configured[0];
+    const [entity, state] = selection || [];
+    this._entity = entity;
+
+    const root = this.shadowRoot;
+    root.querySelector("ha-menu-button").hass = this._hass;
+    root.querySelector("h1").textContent = text.title;
+    const settings = root.querySelector("header a");
+    settings.textContent = text.settings;
+    settings.hidden = !user?.is_admin;
+    root.querySelector("label").hidden = configured.length <= 1;
+    root.querySelector("label span").textContent = labels[lang].queue;
+
+    const optionsKey = JSON.stringify(configured.map(([id, item]) => [id, item.attributes.queue]));
+    if (optionsKey !== this._optionsKey) {
+      this._select.replaceChildren(...configured.map(([id, item]) => {
+        const option = document.createElement("option");
+        option.value = id;
+        option.textContent = `${item.attributes.operator_name} · ${item.attributes.queue}`;
+        return option;
+      }));
+      this._optionsKey = optionsKey;
+    }
+    Array.from(this._select.options).forEach((option) => {
+      option.selected = option.value === entity;
+    });
+
+    const grid = state && Object.values(states).find(({ attributes }) =>
+      attributes.queue === state.attributes.queue && attributes.operator === state.attributes.operator && attributes.grid_power_source
+    );
+    const formatTime = new Intl.DateTimeFormat(lang, {
+      timeZone: "Europe/Kyiv", month: "short", day: "numeric",
+      hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+    });
+    const timestamp = (value) => value && Number.isFinite(Date.parse(value))
+      ? formatTime.format(new Date(value))
+      : text.noTime;
+    const values = [
+      [text.schedule, text[state?.state] ?? text.unavailable],
+      [text.grid, grid ? (text[grid.state] ?? text.unavailable) : text.missing],
+      [text.next, timestamp(state?.attributes.next_outage)],
+      [text.restore, timestamp(state?.attributes.next_restoration)],
+    ];
+    root.querySelectorAll("dl div").forEach((item, i) => {
+      item.querySelector("dt").textContent = values[i][0];
+      item.querySelector("dd").textContent = values[i][1];
+    });
+
+    this._card.setConfig({ entity });
+    this._card.hass = this._hass;
+  }
+}
+
+if (!customElements.get(panelType)) {
+  customElements.define(panelType, ZakarpattiaOutagesPanel);
+}

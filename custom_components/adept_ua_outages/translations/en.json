@@ -1,0 +1,73 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Choose a region",
+        "description": "Choose the region or city first, then your operator and outage group.",
+        "data": {
+          "region": "Region or city"
+        }
+      },
+      "reconfigure": {
+        "title": "Grid power measurement",
+        "data": {
+          "grid_sensor": "Grid power binary sensor (optional)",
+          "invert_grid": "Invert the sensor (On means grid power is absent)"
+        }
+      },
+      "operator": {
+        "title": "Choose an operator",
+        "data": {
+          "operator": "Distribution operator"
+        }
+      },
+      "queue": {
+        "title": "Outage group",
+        "description": "{operator}. Select your outage group or enter its number. {note}",
+        "data": {
+          "queue": "Outage subqueue",
+          "grid_sensor": "Grid power binary sensor (optional)",
+          "invert_grid": "Invert the sensor (On means grid power is absent)"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "This operator and group are already configured.",
+      "reconfigure_successful": "Grid power measurement updated."
+    },
+    "error": {
+      "invalid_queue": "Enter a group number, such as 3 or 3.2."
+    }
+  },
+  "entity": {
+    "calendar": {
+      "schedule": {
+        "name": "Outage schedule {queue} · {operator}"
+      }
+    },
+    "sensor": {
+      "status": {
+        "name": "Schedule status {queue} · {operator}",
+        "state": {
+          "unpublished": "Schedule unavailable for today",
+          "outage_scheduled": "Outage scheduled",
+          "no_outage_scheduled": "No outage scheduled now",
+          "unsupported": "No schedule source",
+          "emergency": "Emergency restrictions",
+          "possible_outage": "Possible outage"
+        }
+      },
+      "next_outage": {
+        "name": "Next scheduled outage {queue} · {operator}"
+      },
+      "next_restoration": {
+        "name": "Next scheduled restoration {queue} · {operator}"
+      }
+    },
+    "binary_sensor": {
+      "grid_power": {
+        "name": "Grid power {queue} · {operator}"
+      }
+    }
+  }
+}
